@@ -435,6 +435,58 @@ body {
   50% { opacity: 1; transform: scale(1); }
 }
 
+/* Search results in main area */
+.results-header {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.results-header strong { color: var(--text); }
+
+.result-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+  gap: 12px;
+}
+.result-card:hover {
+  background: var(--surface2);
+  border-color: var(--accent-dim);
+  transform: translateY(-1px);
+}
+
+.rc-info { flex: 1; min-width: 0; }
+.rc-song { font-size: 15px; font-weight: 600; }
+.rc-artist { font-size: 13px; color: var(--text-muted); margin-top: 2px; }
+.rc-meta {
+  display: flex;
+  gap: 12px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.rc-rating { color: #e3b341; font-weight: 600; }
+.rc-best {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--section);
+  background: rgba(81,207,102,0.1);
+  padding: 3px 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
 /* Mobile */
 @media (max-width: 768px) {
   body { flex-direction: column; }
@@ -559,8 +611,8 @@ function transposeChord(name, semi) {
 }
 
 // ── API ──
-async function apiFetch(query) {
-  const resp = await fetch('/api/fetch.py?q=' + encodeURIComponent(query));
+async function apiSearch(query) {
+  const resp = await fetch('/api/search.py?q=' + encodeURIComponent(query));
   return resp.json();
 }
 
@@ -574,8 +626,6 @@ const searchInput = document.getElementById('searchInput');
 const searchResults = document.getElementById('searchResults');
 const searchSpinner = document.getElementById('searchSpinner');
 
-let lastSearchResults = [];
-
 searchInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     e.preventDefault();
@@ -583,6 +633,10 @@ searchInput.addEventListener('keydown', (e) => {
     if (q.length < 2) return;
     searchResults.classList.remove('open');
     doSearch(q);
+  }
+  if (e.key === 'Escape') {
+    searchResults.classList.remove('open');
+    searchInput.blur();
   }
 });
 
@@ -593,7 +647,6 @@ searchInput.addEventListener('input', () => {
     searchResults.classList.remove('open');
     return;
   }
-  // Show a "press Enter to search" hint
   searchResults.innerHTML = '<div class="search-error" style="color:var(--text-muted)">Press Enter to search...</div>';
   searchResults.classList.add('open');
 });
@@ -601,14 +654,10 @@ searchInput.addEventListener('input', () => {
 async function doSearch(q) {
   searchSpinner.classList.add('active');
   searchResults.classList.remove('open');
+  currentSong = null;
 
-  // Show loading in main area
-  document.getElementById('topBar').style.display = 'flex';
-  document.getElementById('songTitle').textContent = 'Searching...';
-  document.getElementById('songArtist').textContent = q;
-  document.getElementById('songRating').textContent = '';
-  document.getElementById('songVotes').textContent = '';
-  document.getElementById('songCapo').textContent = '';
+  // Show loading in main area, hide top bar
+  document.getElementById('topBar').style.display = 'none';
   document.getElementById('chordBar').style.display = 'none';
   document.getElementById('content').innerHTML = `
     <div class="loading-state">
@@ -618,42 +667,23 @@ async function doSearch(q) {
     </div>`;
 
   try {
-    const data = await apiFetch(q);
+    const data = await apiSearch(q);
     searchSpinner.classList.remove('active');
 
-    if (data.error && !data.search_results) {
+    if (data.error) {
       document.getElementById('content').innerHTML =
         '<div class="empty-state"><div class="empty-title">Error</div><div class="empty-sub">' + esc(data.error) + '</div></div>';
       return;
     }
 
-    // Show search results in dropdown for alternative picks
-    if (data.search_results && data.search_results.length > 1) {
-      lastSearchResults = data.search_results;
-      renderSearchResults(data.search_results);
-      searchResults.classList.add('open');
+    const results = data.results || [];
+    if (results.length === 0) {
+      document.getElementById('content').innerHTML =
+        '<div class="empty-state"><div class="empty-title">No results</div><div class="empty-sub">No chord versions found for "' + esc(q) + '".</div></div>';
+      return;
     }
 
-    if (data.tab) {
-      currentSong = {
-        id: data.tab.id,
-        song_name: data.tab.song_name,
-        artist_name: data.tab.artist_name,
-        rating: data.tab.rating,
-        votes: data.tab.votes,
-        tonality: data.tab.tonality || '',
-        capo: data.tab.capo || 0,
-        content: data.tab.content,
-      };
-      currentTranspose = 0;
-      saveSong(currentSong);
-      render();
-      searchInput.value = '';
-      searchResults.classList.remove('open');
-    } else if (data.error) {
-      document.getElementById('content').innerHTML =
-        '<div class="empty-state"><div class="empty-title">Could not load chords</div><div class="empty-sub">' + esc(data.error) + '<br>Try clicking an alternative from the dropdown.</div></div>';
-    }
+    renderResultsList(results, q);
   } catch (e) {
     searchSpinner.classList.remove('active');
     document.getElementById('content').innerHTML =
@@ -661,43 +691,32 @@ async function doSearch(q) {
   }
 }
 
-// Close dropdown on Escape (the Enter handler is above)
-searchInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') {
-    searchResults.classList.remove('open');
-    searchInput.blur();
-  }
-});
+function renderResultsList(results, query) {
+  let html = '<div class="results-header">Results for <strong>' + esc(query) + '</strong></div>';
 
-document.addEventListener('click', (e) => {
-  if (!e.target.closest('.search-box')) {
-    searchResults.classList.remove('open');
-  }
-});
+  results.slice(0, 20).forEach((r, i) => {
+    html += `
+      <div class="result-card" data-idx="${i}">
+        <div class="rc-info">
+          <div class="rc-song">${esc(r.song_name)}</div>
+          <div class="rc-artist">${esc(r.artist_name)}</div>
+          <div class="rc-meta">
+            <span class="rc-rating">${'\u2605'} ${r.rating.toFixed(2)}</span>
+            <span>${r.votes.toLocaleString()} votes</span>
+            <span>v${r.version}</span>
+            ${r.tonality ? '<span>Key: ' + esc(r.tonality) + '</span>' : ''}
+          </div>
+        </div>
+        ${i === 0 ? '<span class="rc-best">Top rated</span>' : ''}
+      </div>`;
+  });
 
-function renderSearchResults(results) {
-  if (results.length === 0) {
-    searchResults.innerHTML = '<div class="search-error">No chord results found.</div>';
-    return;
-  }
-  // Show top 15, already sorted by rating+votes from API
-  searchResults.innerHTML = results.slice(0, 15).map((r, i) => `
-    <div class="search-result-item" data-idx="${i}">
-      <div class="sr-song">${esc(r.song_name)}</div>
-      <div class="sr-artist">${esc(r.artist_name)}</div>
-      <div class="sr-meta">
-        <span class="sr-rating">${'\u2605'} ${r.rating.toFixed(2)}</span>
-        <span>${r.votes.toLocaleString()} votes</span>
-        <span>v${r.version}</span>
-      </div>
-    </div>
-  `).join('');
+  document.getElementById('content').innerHTML = html;
 
-  searchResults.querySelectorAll('.search-result-item').forEach((el, i) => {
+  document.querySelectorAll('.result-card').forEach((el) => {
     el.addEventListener('click', () => {
-      loadSong(results[i]);
-      searchResults.classList.remove('open');
-      searchInput.value = '';
+      const idx = Number(el.dataset.idx);
+      loadSong(results[idx]);
     });
   });
 }
