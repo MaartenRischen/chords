@@ -559,13 +559,13 @@ function transposeChord(name, semi) {
 }
 
 // ── API ──
-async function apiSearch(query) {
-  const resp = await fetch('/api/search.py?q=' + encodeURIComponent(query));
+async function apiFetch(query) {
+  const resp = await fetch('/api/fetch.py?q=' + encodeURIComponent(query));
   return resp.json();
 }
 
-async function apiTab(idOrUrl) {
-  const resp = await fetch('/api/tab.py?id=' + encodeURIComponent(idOrUrl));
+async function apiFetchUrl(tabUrl) {
+  const resp = await fetch('/api/fetch.py?url=' + encodeURIComponent(tabUrl));
   return resp.json();
 }
 
@@ -574,6 +574,18 @@ const searchInput = document.getElementById('searchInput');
 const searchResults = document.getElementById('searchResults');
 const searchSpinner = document.getElementById('searchSpinner');
 
+let lastSearchResults = [];
+
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const q = searchInput.value.trim();
+    if (q.length < 2) return;
+    searchResults.classList.remove('open');
+    doSearch(q);
+  }
+});
+
 searchInput.addEventListener('input', () => {
   clearTimeout(searchTimeout);
   const q = searchInput.value.trim();
@@ -581,24 +593,75 @@ searchInput.addEventListener('input', () => {
     searchResults.classList.remove('open');
     return;
   }
-  searchSpinner.classList.add('active');
-  searchTimeout = setTimeout(async () => {
-    try {
-      const data = await apiSearch(q);
-      if (data.error) {
-        searchResults.innerHTML = '<div class="search-error">' + data.error + '</div>';
-      } else {
-        renderSearchResults(data.results || []);
-      }
-      searchResults.classList.add('open');
-    } catch (e) {
-      searchResults.innerHTML = '<div class="search-error">Network error. Try again.</div>';
-      searchResults.classList.add('open');
-    }
-    searchSpinner.classList.remove('active');
-  }, 400);
+  // Show a "press Enter to search" hint
+  searchResults.innerHTML = '<div class="search-error" style="color:var(--text-muted)">Press Enter to search...</div>';
+  searchResults.classList.add('open');
 });
 
+async function doSearch(q) {
+  searchSpinner.classList.add('active');
+  searchResults.classList.remove('open');
+
+  // Show loading in main area
+  document.getElementById('topBar').style.display = 'flex';
+  document.getElementById('songTitle').textContent = 'Searching...';
+  document.getElementById('songArtist').textContent = q;
+  document.getElementById('songRating').textContent = '';
+  document.getElementById('songVotes').textContent = '';
+  document.getElementById('songCapo').textContent = '';
+  document.getElementById('chordBar').style.display = 'none';
+  document.getElementById('content').innerHTML = `
+    <div class="loading-state">
+      <div class="loading-dot"></div>
+      <div class="loading-dot"></div>
+      <div class="loading-dot"></div>
+    </div>`;
+
+  try {
+    const data = await apiFetch(q);
+    searchSpinner.classList.remove('active');
+
+    if (data.error && !data.search_results) {
+      document.getElementById('content').innerHTML =
+        '<div class="empty-state"><div class="empty-title">Error</div><div class="empty-sub">' + esc(data.error) + '</div></div>';
+      return;
+    }
+
+    // Show search results in dropdown for alternative picks
+    if (data.search_results && data.search_results.length > 1) {
+      lastSearchResults = data.search_results;
+      renderSearchResults(data.search_results);
+      searchResults.classList.add('open');
+    }
+
+    if (data.tab) {
+      currentSong = {
+        id: data.tab.id,
+        song_name: data.tab.song_name,
+        artist_name: data.tab.artist_name,
+        rating: data.tab.rating,
+        votes: data.tab.votes,
+        tonality: data.tab.tonality || '',
+        capo: data.tab.capo || 0,
+        content: data.tab.content,
+      };
+      currentTranspose = 0;
+      saveSong(currentSong);
+      render();
+      searchInput.value = '';
+      searchResults.classList.remove('open');
+    } else if (data.error) {
+      document.getElementById('content').innerHTML =
+        '<div class="empty-state"><div class="empty-title">Could not load chords</div><div class="empty-sub">' + esc(data.error) + '<br>Try clicking an alternative from the dropdown.</div></div>';
+    }
+  } catch (e) {
+    searchSpinner.classList.remove('active');
+    document.getElementById('content').innerHTML =
+      '<div class="empty-state"><div class="empty-title">Network error</div><div class="empty-sub">Could not reach the server. Try again.</div></div>';
+  }
+}
+
+// Close dropdown on Escape (the Enter handler is above)
 searchInput.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     searchResults.classList.remove('open');
@@ -643,6 +706,8 @@ function renderSearchResults(results) {
 async function loadSong(searchResult) {
   // Show loading
   document.getElementById('topBar').style.display = 'flex';
+  document.getElementById('songTitle').textContent = searchResult.song_name;
+  document.getElementById('songArtist').textContent = searchResult.artist_name;
   document.getElementById('chordBar').style.display = 'none';
   document.getElementById('content').innerHTML = `
     <div class="loading-state">
@@ -652,7 +717,13 @@ async function loadSong(searchResult) {
     </div>`;
 
   try {
-    const data = await apiTab(searchResult.tab_url || searchResult.id);
+    const tabUrl = searchResult.tab_url;
+    if (!tabUrl) {
+      document.getElementById('content').innerHTML =
+        '<div class="empty-state"><div class="empty-title">No URL</div><div class="empty-sub">This result has no tab URL.</div></div>';
+      return;
+    }
+    const data = await apiFetchUrl(tabUrl);
     if (data.error) {
       document.getElementById('content').innerHTML =
         '<div class="empty-state"><div class="empty-title">Error</div><div class="empty-sub">' + esc(data.error) + '</div></div>';
@@ -660,18 +731,17 @@ async function loadSong(searchResult) {
     }
 
     currentSong = {
-      id: searchResult.id,
-      song_name: data.song_name || searchResult.song_name,
-      artist_name: data.artist_name || searchResult.artist_name,
-      rating: data.rating || searchResult.rating,
-      votes: data.votes || searchResult.votes,
-      tonality: data.tonality || '',
-      capo: data.capo || 0,
-      content: data.content,
+      id: data.tab.id || searchResult.id,
+      song_name: data.tab.song_name || searchResult.song_name,
+      artist_name: data.tab.artist_name || searchResult.artist_name,
+      rating: data.tab.rating || searchResult.rating,
+      votes: data.tab.votes || searchResult.votes,
+      tonality: data.tab.tonality || '',
+      capo: data.tab.capo || 0,
+      content: data.tab.content,
     };
     currentTranspose = 0;
 
-    // Save to library
     saveSong(currentSong);
     render();
   } catch (e) {
