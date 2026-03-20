@@ -560,12 +560,12 @@ function transposeChord(name, semi) {
 
 // ── API ──
 async function apiSearch(query) {
-  const resp = await fetch('/api/search?q=' + encodeURIComponent(query));
+  const resp = await fetch('/api/search.py?q=' + encodeURIComponent(query));
   return resp.json();
 }
 
 async function apiTab(idOrUrl) {
-  const resp = await fetch('/api/tab?id=' + encodeURIComponent(idOrUrl));
+  const resp = await fetch('/api/tab.py?id=' + encodeURIComponent(idOrUrl));
   return resp.json();
 }
 
@@ -652,7 +652,7 @@ async function loadSong(searchResult) {
     </div>`;
 
   try {
-    const data = await apiTab(searchResult.id);
+    const data = await apiTab(searchResult.tab_url || searchResult.id);
     if (data.error) {
       document.getElementById('content').innerHTML =
         '<div class="empty-state"><div class="empty-title">Error</div><div class="empty-sub">' + esc(data.error) + '</div></div>';

@@ -38,6 +38,7 @@ def search_ug(query):
             "votes": r.get("votes", 0),
             "version": r.get("version"),
             "tonality": r.get("tonality_name", ""),
+            "tab_url": r.get("tab_url", ""),
         })
 
     chords.sort(key=lambda x: (x["rating"], x["votes"]), reverse=True)
