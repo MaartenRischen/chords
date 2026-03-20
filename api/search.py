@@ -1,48 +1,73 @@
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 import json
+import time
 import cloudscraper
 from bs4 import BeautifulSoup
 
 
+BROWSER_CONFIGS = [
+    {"browser": {"browser": "chrome", "platform": "windows", "desktop": True}},
+    {"browser": {"browser": "chrome", "platform": "linux", "desktop": True}},
+    {"browser": {"browser": "firefox", "platform": "windows", "desktop": True}},
+    {"browser": "chrome"},
+    {},
+]
+
+
 def search_ug(query):
-    scraper = cloudscraper.create_scraper()
     url = f"https://www.ultimate-guitar.com/search.php?search_type=title&value={query}"
-    resp = scraper.get(url, timeout=15)
 
-    if resp.status_code != 200:
-        return {"error": f"UG returned {resp.status_code}"}
+    last_error = None
+    for attempt in range(3):
+        try:
+            idx = attempt % len(BROWSER_CONFIGS)
+            scraper = cloudscraper.create_scraper(**BROWSER_CONFIGS[idx])
+            resp = scraper.get(url, timeout=20)
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    store = soup.find("div", class_="js-store")
-    if not store:
-        return {"error": "Could not parse page"}
+            if resp.status_code != 200:
+                last_error = f"UG returned {resp.status_code}"
+                if attempt < 2:
+                    time.sleep(0.5)
+                continue
 
-    data = json.loads(store.get("data-content", "{}"))
-    results = data.get("store", {}).get("page", {}).get("data", {}).get("results", [])
+            soup = BeautifulSoup(resp.text, "html.parser")
+            store = soup.find("div", class_="js-store")
+            if not store:
+                return {"error": "Could not parse page"}
 
-    chords = []
-    for r in results:
-        if not isinstance(r, dict):
-            continue
-        if r.get("type") != "Chords":
-            continue
-        if r.get("marketing_type") == "pro":
-            continue
+            data = json.loads(store.get("data-content", "{}"))
+            results = data.get("store", {}).get("page", {}).get("data", {}).get("results", [])
 
-        chords.append({
-            "id": r.get("id"),
-            "song_name": r.get("song_name"),
-            "artist_name": r.get("artist_name"),
-            "rating": round(r.get("rating", 0), 2),
-            "votes": r.get("votes", 0),
-            "version": r.get("version"),
-            "tonality": r.get("tonality_name", ""),
-            "tab_url": r.get("tab_url", ""),
-        })
+            chords = []
+            for r in results:
+                if not isinstance(r, dict):
+                    continue
+                if r.get("type") != "Chords":
+                    continue
+                if r.get("marketing_type") == "pro":
+                    continue
 
-    chords.sort(key=lambda x: (x["rating"], x["votes"]), reverse=True)
-    return {"results": chords}
+                chords.append({
+                    "id": r.get("id"),
+                    "song_name": r.get("song_name"),
+                    "artist_name": r.get("artist_name"),
+                    "rating": round(r.get("rating", 0), 2),
+                    "votes": r.get("votes", 0),
+                    "version": r.get("version"),
+                    "tonality": r.get("tonality_name", ""),
+                    "tab_url": r.get("tab_url", ""),
+                })
+
+            chords.sort(key=lambda x: (x["rating"], x["votes"]), reverse=True)
+            return {"results": chords}
+
+        except Exception as e:
+            last_error = str(e)
+            if attempt < 2:
+                time.sleep(0.5)
+
+    return {"error": last_error or "Search failed after retries"}
 
 
 class handler(BaseHTTPRequestHandler):

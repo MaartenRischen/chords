@@ -1,30 +1,83 @@
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 import json
+import time
 import cloudscraper
 from bs4 import BeautifulSoup
 
 
-def fetch_best_chords(query):
-    """Search UG and fetch the highest-rated chords version in one session."""
-    scraper = cloudscraper.create_scraper()
+BROWSER_CONFIGS = [
+    {"browser": {"browser": "chrome", "platform": "windows", "desktop": True}},
+    {"browser": {"browser": "chrome", "platform": "linux", "desktop": True}},
+    {"browser": {"browser": "firefox", "platform": "windows", "desktop": True}},
+    {"browser": "chrome"},
+    {},
+]
 
-    # Step 1: Search
-    search_url = f"https://www.ultimate-guitar.com/search.php?search_type=title&value={query}"
-    resp = scraper.get(search_url, timeout=20)
 
-    if resp.status_code != 200:
-        return {"error": f"Search failed (status {resp.status_code})"}
+def make_scraper(attempt=0):
+    idx = attempt % len(BROWSER_CONFIGS)
+    return cloudscraper.create_scraper(**BROWSER_CONFIGS[idx])
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+
+def scrape_with_retry(url, max_retries=3):
+    """Try fetching a URL with different cloudscraper configs until one works."""
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            scraper = make_scraper(attempt)
+            resp = scraper.get(url, timeout=20)
+            if resp.status_code == 200:
+                return scraper, resp
+            last_error = f"status {resp.status_code}"
+        except Exception as e:
+            last_error = str(e)
+        if attempt < max_retries - 1:
+            time.sleep(0.5)
+    return None, last_error
+
+
+def parse_tab_page(html):
+    """Extract tab data from a UG page HTML."""
+    soup = BeautifulSoup(html, "html.parser")
     store = soup.find("div", class_="js-store")
     if not store:
-        return {"error": "Could not parse search page"}
+        return None, "Could not parse page"
+
+    data = json.loads(store.get("data-content", "{}"))
+    page_data = data.get("store", {}).get("page", {}).get("data", {})
+
+    tab_info = page_data.get("tab", {})
+    tab_view = page_data.get("tab_view", {})
+    wiki_tab = tab_view.get("wiki_tab", {})
+    content = wiki_tab.get("content", "")
+
+    if not content:
+        return None, "No chord content found"
+
+    return {
+        "id": tab_info.get("id"),
+        "song_name": tab_info.get("song_name"),
+        "artist_name": tab_info.get("artist_name"),
+        "rating": round(tab_info.get("rating", 0), 2),
+        "votes": tab_info.get("votes", 0),
+        "capo": tab_info.get("capo", 0),
+        "tonality": tab_info.get("tonality_name", ""),
+        "version": tab_info.get("version"),
+        "content": content,
+    }, None
+
+
+def parse_search_results(html):
+    """Extract chord search results from a UG search page HTML."""
+    soup = BeautifulSoup(html, "html.parser")
+    store = soup.find("div", class_="js-store")
+    if not store:
+        return [], "Could not parse search page"
 
     data = json.loads(store.get("data-content", "{}"))
     results = data.get("store", {}).get("page", {}).get("data", {}).get("results", [])
 
-    # Filter to chords only, no pro
     chords = []
     for r in results:
         if not isinstance(r, dict):
@@ -35,13 +88,24 @@ def fetch_best_chords(query):
             continue
         chords.append(r)
 
+    chords.sort(key=lambda x: (x.get("rating", 0), x.get("votes", 0)), reverse=True)
+    return chords, None
+
+
+def fetch_best_chords(query):
+    """Search UG and fetch the highest-rated chords version."""
+    search_url = f"https://www.ultimate-guitar.com/search.php?search_type=title&value={query}"
+
+    scraper, resp = scrape_with_retry(search_url)
+    if scraper is None:
+        return {"error": f"Search failed ({resp})"}
+
+    chords, err = parse_search_results(resp.text)
+    if err:
+        return {"error": err}
     if not chords:
         return {"error": "No chord results found"}
 
-    # Sort by (rating, votes) descending
-    chords.sort(key=lambda x: (x.get("rating", 0), x.get("votes", 0)), reverse=True)
-
-    # Also return all search results for the frontend
     search_results = []
     for c in chords[:15]:
         search_results.append({
@@ -57,88 +121,35 @@ def fetch_best_chords(query):
 
     best = chords[0]
     tab_url = best.get("tab_url")
-
     if not tab_url:
         return {"error": "No tab URL found", "search_results": search_results}
 
-    # Step 2: Fetch the tab page using the SAME session (cookies carry over)
+    # Fetch tab using the SAME session first (cookies help), fallback to retry
     tab_resp = scraper.get(tab_url, timeout=20)
-
     if tab_resp.status_code != 200:
-        return {"error": f"Tab fetch failed (status {tab_resp.status_code})", "search_results": search_results}
+        # Retry with fresh scrapers
+        _, tab_resp = scrape_with_retry(tab_url)
+        if not isinstance(tab_resp, type(resp)):
+            return {"error": f"Tab fetch failed ({tab_resp})", "search_results": search_results}
 
-    tab_soup = BeautifulSoup(tab_resp.text, "html.parser")
-    tab_store = tab_soup.find("div", class_="js-store")
-    if not tab_store:
-        return {"error": "Could not parse tab page", "search_results": search_results}
+    tab, err = parse_tab_page(tab_resp.text)
+    if err:
+        return {"error": err, "search_results": search_results}
 
-    tab_data = json.loads(tab_store.get("data-content", "{}"))
-    page_data = tab_data.get("store", {}).get("page", {}).get("data", {})
-
-    tab_info = page_data.get("tab", {})
-    tab_view = page_data.get("tab_view", {})
-    wiki_tab = tab_view.get("wiki_tab", {})
-    content = wiki_tab.get("content", "")
-
-    if not content:
-        return {"error": "No chord content found", "search_results": search_results}
-
-    return {
-        "tab": {
-            "id": tab_info.get("id") or best.get("id"),
-            "song_name": tab_info.get("song_name"),
-            "artist_name": tab_info.get("artist_name"),
-            "rating": round(tab_info.get("rating", 0), 2),
-            "votes": tab_info.get("votes", 0),
-            "capo": tab_info.get("capo", 0),
-            "tonality": tab_info.get("tonality_name", ""),
-            "version": tab_info.get("version"),
-            "content": content,
-        },
-        "search_results": search_results,
-    }
+    return {"tab": tab, "search_results": search_results}
 
 
 def fetch_tab_by_url(tab_url):
     """Fetch a specific tab by its full URL."""
-    scraper = cloudscraper.create_scraper()
+    scraper, resp = scrape_with_retry(tab_url)
+    if scraper is None:
+        return {"error": f"Tab fetch failed ({resp})"}
 
-    # Warm up the session on the search page first
-    scraper.get("https://www.ultimate-guitar.com/", timeout=10)
+    tab, err = parse_tab_page(resp.text)
+    if err:
+        return {"error": err}
 
-    resp = scraper.get(tab_url, timeout=20)
-    if resp.status_code != 200:
-        return {"error": f"Tab fetch failed (status {resp.status_code})"}
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    store = soup.find("div", class_="js-store")
-    if not store:
-        return {"error": "Could not parse tab page"}
-
-    data = json.loads(store.get("data-content", "{}"))
-    page_data = data.get("store", {}).get("page", {}).get("data", {})
-
-    tab_info = page_data.get("tab", {})
-    tab_view = page_data.get("tab_view", {})
-    wiki_tab = tab_view.get("wiki_tab", {})
-    content = wiki_tab.get("content", "")
-
-    if not content:
-        return {"error": "No chord content found"}
-
-    return {
-        "tab": {
-            "id": tab_info.get("id"),
-            "song_name": tab_info.get("song_name"),
-            "artist_name": tab_info.get("artist_name"),
-            "rating": round(tab_info.get("rating", 0), 2),
-            "votes": tab_info.get("votes", 0),
-            "capo": tab_info.get("capo", 0),
-            "tonality": tab_info.get("tonality_name", ""),
-            "version": tab_info.get("version"),
-            "content": content,
-        },
-    }
+    return {"tab": tab}
 
 
 class handler(BaseHTTPRequestHandler):
