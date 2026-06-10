@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0e1116">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Chords</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b24;
+    --panel2: #1d2430;
+    --text: #e8ecf3;
+    --dim: #8b95a7;
+    --accent: #ffb454;
+    --accent2: #4fd6be;
+    --line: #232b3a;
+    --sheet-size: 15px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
+
+  header {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(14,17,22,.92); backdrop-filter: blur(12px);
+    padding: calc(10px + env(safe-area-inset-top)) 14px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  .searchrow { display: flex; gap: 8px; }
+  #q {
+    flex: 1; min-width: 0; background: var(--panel); border: 1px solid var(--line);
+    color: var(--text); border-radius: 12px; padding: 12px 14px; font-size: 16px;
+    outline: none;
+  }
+  #q:focus { border-color: var(--accent2); }
+  #go {
+    background: var(--accent2); color: #06241e; border: none; border-radius: 12px;
+    padding: 0 18px; font-size: 15px; font-weight: 700; cursor: pointer;
+  }
+  #go:active { transform: scale(.96); }
+  #homebtn {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    font-size: 19px; padding: 0 12px; cursor: pointer;
+  }
+  #homebtn:active { transform: scale(.96); }
+
+  #status { padding: 40px 24px; text-align: center; color: var(--dim); font-size: 15px; line-height: 1.5; }
+  #status .big { font-size: 40px; display: block; margin-bottom: 12px; }
+  .spinner {
+    width: 28px; height: 28px; margin: 0 auto 14px; border-radius: 50%;
+    border: 3px solid var(--line); border-top-color: var(--accent2);
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .recent { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+  .recent button {
+    background: var(--panel); border: 1px solid var(--line); color: var(--text);
+    border-radius: 999px; padding: 8px 14px; font-size: 14px; cursor: pointer;
+  }
+
+  /* search suggestions */
+  .searchwrap { position: relative; }
+  #sugg {
+    position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 30;
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 14px;
+    overflow: hidden; display: none; box-shadow: 0 12px 32px rgba(0,0,0,.5);
+    max-height: 60vh; overflow-y: auto;
+  }
+  .sugg-row {
+    display: flex; align-items: center; gap: 11px; width: 100%;
+    background: none; border: none; border-bottom: 1px solid var(--line);
+    padding: 10px 12px; cursor: pointer; text-align: left; color: var(--text);
+  }
+  .sugg-row:last-child { border-bottom: none; }
+  .sugg-row:active { background: var(--line); }
+  .sugg-row img { width: 38px; height: 38px; border-radius: 8px; background: var(--panel); flex: none; }
+  .sugg-row .t { font-size: 15px; font-weight: 600; }
+  .sugg-row .a { font-size: 12.5px; color: var(--dim); margin-top: 1px; }
+  .sugg-row .txt { min-width: 0; }
+  .sugg-row .t, .sugg-row .a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* library */
+  .lib { margin-top: 22px; text-align: left; }
+  .lib h3 {
+    margin: 0 0 10px; font-size: 12px; text-transform: uppercase;
+    letter-spacing: .08em; color: var(--dim); text-align: center;
+  }
+  .lib-row {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 12px 14px; margin-bottom: 8px;
+  }
+  .lib-row .txt { flex: 1; min-width: 0; cursor: pointer; }
+  .lib-row .t { font-size: 15.5px; font-weight: 600; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lib-row .a { font-size: 12.5px; color: var(--dim); margin-top: 2px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lib-row .badge {
+    flex: none; font-size: 12px; font-weight: 700; color: var(--accent);
+    background: rgba(255,180,84,.12); border-radius: 8px; padding: 4px 8px;
+  }
+  .lib-row .del {
+    flex: none; background: none; border: none; color: var(--dim);
+    font-size: 18px; padding: 6px 4px; cursor: pointer;
+  }
+
+  #songview { display: none; }
+  .meta { padding: 16px 16px 4px; }
+  .meta h1 { margin: 0; font-size: 22px; line-height: 1.2; }
+  .meta h2 { margin: 2px 0 10px; font-size: 15px; font-weight: 500; color: var(--dim); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .chip {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+    padding: 5px 11px; font-size: 12.5px; color: var(--dim);
+  }
+  .chip b { color: var(--text); font-weight: 600; }
+  .chip.star b { color: var(--accent); }
+  select#versions {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 999px; padding: 5px 8px; font-size: 12.5px; max-width: 46vw;
+  }
+
+  #sheet {
+    font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: var(--sheet-size); line-height: 1.5;
+    white-space: pre; overflow-x: auto; -webkit-overflow-scrolling: touch;
+    padding: 14px 16px 30px;
+  }
+  #sheet .ch { color: var(--accent); font-weight: 700; }
+  #sheet .sec { color: var(--accent2); font-weight: 700; }
+
+  .controls {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; display: none;
+    background: rgba(20,25,33,.95); backdrop-filter: blur(12px);
+    border-top: 1px solid var(--line);
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  }
+  .controls .row { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+  .group { display: flex; align-items: center; gap: 6px; background: var(--panel2);
+    border-radius: 12px; padding: 4px; }
+  .group .label { font-size: 10px; color: var(--dim); text-transform: uppercase;
+    letter-spacing: .06em; padding: 0 4px 0 8px; }
+  .btn {
+    background: transparent; color: var(--text); border: none; border-radius: 9px;
+    min-width: 40px; height: 40px; font-size: 19px; font-weight: 700; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .btn:active { background: var(--line); }
+  #toff { min-width: 38px; text-align: center; font-size: 15px; font-weight: 700; color: var(--accent); }
+  #scrollbtn { background: var(--panel2); border-radius: 12px; width: 52px; height: 48px; font-size: 20px; }
+  #scrollbtn.on { background: var(--accent2); color: #06241e; }
+  #speed { width: 64px; accent-color: var(--accent2); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="searchwrap">
+    <form class="searchrow" id="form">
+      <button id="homebtn" type="button" title="Library">&#127928;</button>
+      <input id="q" type="search" placeholder="Search any song… e.g. wonderwall" autocomplete="off" autocapitalize="off">
+      <button id="go" type="submit">Go</button>
+    </form>
+    <div id="sugg"></div>
+  </div>
+</header>
+
+<div id="status"></div>
+
+<div id="songview">
+  <div class="meta">
+    <h1 id="song"></h1>
+    <h2 id="artist"></h2>
+    <div class="chips">
+      <span class="chip star">&#9733; <b id="rating"></b> <span id="votes"></span></span>
+      <span class="chip" id="capochip" hidden>Capo <b id="capo"></b></span>
+      <span class="chip" id="keychip" hidden>Key <b id="key"></b></span>
+      <span class="chip" id="tunechip" hidden>Tuning <b id="tuning"></b></span>
+      <select id="versions"></select>
+    </div>
+  </div>
+  <div id="sheet"></div>
+</div>
+
+<div class="controls" id="controls">
+  <div class="row">
+    <div class="group">
+      <span class="label">Transpose</span>
+      <button class="btn" id="tdown">&minus;</button>
+      <span id="toff">0</span>
+      <button class="btn" id="tup">+</button>
+    </div>
+    <div class="group">
+      <span class="label">Aa</span>
+      <button class="btn" id="fdown" style="font-size:14px">A</button>
+      <button class="btn" id="fup">A</button>
+    </div>
+    <div class="group">
+      <button class="btn" id="scrollbtn">&#9654;</button>
+      <input type="range" id="speed" min="1" max="10" value="3">
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// API lives on a Cloudflare Worker when this page is served statically
+// (GitHub Pages); same-origin when running the local Node server.
+const API_BASE = ['localhost', '127.0.0.1'].includes(location.hostname)
+  ? '' : 'https://chords-api.maartenrischen.workers.dev';
+
+// ---------- state ----------
+let currentTab = null;     // payload from /api/song or /api/tab
+let versionList = [];      // kept across version switches
+let offset = 0;            // transpose offset in semitones
+let sheetSize = 15;
+let scrolling = false;
+
+const $ = (id) => document.getElementById(id);
+
+// ---------- transposition ----------
+const SHARP = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const FLAT  = ['C','Db','D','Eb','E','F','Gb','G','Ab','A','Bb','B'];
+const IDX = { 'C':0,'C#':1,'Db':1,'D':2,'D#':3,'Eb':3,'E':4,'Fb':4,'E#':5,'F':5,'F#':6,
+              'Gb':6,'G':7,'G#':8,'Ab':8,'A':9,'A#':10,'Bb':10,'B':11,'Cb':11,'B#':0 };
+
+function transposeChord(chord, n, preferFlat) {
+  if (!n) return chord;
+  return chord.replace(/[A-G](#|b)?/g, (root) => {
+    const i = IDX[root];
+    if (i === undefined) return root;
+    const j = ((i + n) % 12 + 12) % 12;
+    return (preferFlat ? FLAT : SHARP)[j];
+  });
+}
+
+function prefersFlat(content) {
+  const flats = (content.match(/\[ch\][A-G]b/g) || []).length;
+  const sharps = (content.match(/\[ch\][A-G]#/g) || []).length;
+  return flats > sharps;
+}
+
+// ---------- rendering ----------
+function esc(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function renderSheet() {
+  const flat = prefersFlat(currentTab.content);
+  let html = esc(currentTab.content)
+    .replace(/\[\/?tab\]/g, '')
+    // chord + the run of spaces after it, so we can re-pad to keep alignment
+    .replace(/\[ch\](.*?)\[\/ch\]( *)/g, (m, chord, spaces) => {
+      const t = transposeChord(chord, offset, flat);
+      let pad = spaces;
+      const diff = t.length - chord.length;
+      if (diff > 0 && spaces.length > 1) pad = spaces.slice(0, Math.max(1, spaces.length - diff));
+      else if (diff < 0 && spaces.length > 0) pad = spaces + ' '.repeat(-diff);
+      return '<span class="ch">' + t + '</span>' + pad;
+    })
+    .replace(/^\[(Intro|Verse|Chorus|Bridge|Outro|Pre-Chorus|Solo|Interlude|Instrumental|Hook|Refrain)[^\]\n]*\]/gim,
+      (m) => '<span class="sec">' + m + '</span>');
+  $('sheet').innerHTML = html;
+  $('toff').textContent = offset > 0 ? '+' + offset : String(offset);
+
+  const key = currentTab.tonality;
+  if (key) {
+    $('key').textContent = offset ? transposeChord(key, offset, flat) : key;
+    $('keychip').hidden = false;
+  } else $('keychip').hidden = true;
+}
+
+function showTab(tab) {
+  currentTab = tab;
+  if (tab.versions && tab.versions.length) versionList = tab.versions;
+  $('song').textContent = tab.song;
+  $('artist').textContent = tab.artist;
+  $('rating').textContent = tab.rating.toFixed(2);
+  $('votes').textContent = '(' + tab.votes.toLocaleString() + ')';
+  $('capochip').hidden = !tab.capo;
+  $('capo').textContent = tab.capo;
+  const tun = tab.tuning && tab.tuning !== 'E A D G B E' ? tab.tuning : '';
+  $('tunechip').hidden = !tun;
+  $('tuning').textContent = tun;
+
+  const sel = $('versions');
+  sel.innerHTML = '';
+  for (const v of versionList) {
+    const o = document.createElement('option');
+    o.value = v.id;
+    o.textContent = 'v' + v.version + ' ★ ' + v.rating.toFixed(2) + ' (' + v.votes.toLocaleString() + ')';
+    if (v.id === tab.id) o.selected = true;
+    sel.appendChild(o);
+  }
+
+  renderSheet();
+  $('status').style.display = 'none';
+  $('songview').style.display = 'block';
+  $('controls').style.display = 'block';
+  window.scrollTo(0, 0);
+  saveToLibrary();
+}
+
+// ---------- data ----------
+async function api(path) {
+  const res = await fetch(API_BASE + path);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+function setStatus(html) {
+  stopScroll();
+  $('songview').style.display = 'none';
+  $('controls').style.display = 'none';
+  $('status').style.display = 'block';
+  $('status').innerHTML = html;
+}
+
+async function search(q, picked) {
+  q = q.trim();
+  if (!q && !picked) return;
+  const label = picked ? picked.title + ' — ' + picked.artist : q;
+  $('q').value = label;
+  $('q').blur();
+  hideSugg();
+  setStatus('<div class="spinner"></div>Finding the best chords for “' + esc(label) + '”…');
+  try {
+    let url = '/api/song?q=' + encodeURIComponent(q);
+    if (picked) url += '&artist=' + encodeURIComponent(picked.artist) + '&title=' + encodeURIComponent(picked.title);
+    const tab = await api(url);
+    saveRecent(label);
+    versionList = tab.versions;
+    // restore this song's saved transpose setting, if any
+    const saved = libGet()[(tab.artist + '|' + tab.song).toLowerCase()];
+    offset = saved ? saved.offset || 0 : 0;
+    showTab(tab);
+  } catch (e) {
+    renderHome('<span class="big">&#128533;</span>' + esc(e.message));
+  }
+}
+
+async function switchVersion(id) {
+  setStatus('<div class="spinner"></div>Loading version…');
+  try {
+    const tab = await api('/api/tab?id=' + id);
+    showTab(tab);
+  } catch (e) {
+    setStatus('<span class="big">&#128533;</span>' + esc(e.message));
+  }
+}
+
+// ---------- recent searches ----------
+function getRecent() { try { return JSON.parse(localStorage.recent || '[]'); } catch { return []; } }
+function saveRecent(q) {
+  const r = [q, ...getRecent().filter((x) => x.toLowerCase() !== q.toLowerCase())].slice(0, 8);
+  localStorage.recent = JSON.stringify(r);
+}
+function renderRecent() {
+  const el = $('recent');
+  if (!el) return;
+  el.innerHTML = '';
+  for (const q of getRecent()) {
+    const b = document.createElement('button');
+    b.textContent = q;
+    b.onclick = () => search(q);
+    el.appendChild(b);
+  }
+}
+
+// ---------- library (auto-saved songs + transpose settings) ----------
+function libGet() { try { return JSON.parse(localStorage.library || '{}'); } catch { return {}; } }
+function libPut(lib) { try { localStorage.library = JSON.stringify(lib); } catch {} }
+
+function saveToLibrary() {
+  if (!currentTab) return;
+  const lib = libGet();
+  const key = (currentTab.artist + '|' + currentTab.song).toLowerCase();
+  lib[key] = { ...currentTab, versions: versionList, offset, savedAt: Date.now() };
+  const keys = Object.keys(lib);
+  if (keys.length > 100) {
+    keys.sort((a, b) => lib[a].savedAt - lib[b].savedAt);
+    delete lib[keys[0]];
+  }
+  libPut(lib);
+}
+
+function openSaved(key) {
+  const e = libGet()[key];
+  if (!e) return;
+  offset = e.offset || 0;
+  versionList = e.versions || [];
+  showTab(e);
+}
+
+function renderLib() {
+  const el = $('lib');
+  if (!el) return;
+  const entries = Object.entries(libGet()).sort((a, b) => b[1].savedAt - a[1].savedAt);
+  if (!entries.length) { el.style.display = 'none'; return; }
+  el.innerHTML = '<h3>Saved songs</h3>';
+  for (const [key, e] of entries) {
+    const row = document.createElement('div');
+    row.className = 'lib-row';
+    const txt = document.createElement('div');
+    txt.className = 'txt';
+    txt.innerHTML = '<div class="t">' + esc(e.song) + '</div><div class="a">' + esc(e.artist) +
+      ' &middot; &#9733; ' + Number(e.rating).toFixed(2) + '</div>';
+    txt.onclick = () => openSaved(key);
+    row.appendChild(txt);
+    if (e.offset) {
+      const b = document.createElement('span');
+      b.className = 'badge';
+      b.textContent = (e.offset > 0 ? '+' : '') + e.offset;
+      row.appendChild(b);
+    }
+    const del = document.createElement('button');
+    del.className = 'del';
+    del.innerHTML = '&times;';
+    del.onclick = (ev) => {
+      ev.stopPropagation();
+      const lib = libGet();
+      delete lib[key];
+      libPut(lib);
+      renderLib();
+    };
+    row.appendChild(del);
+    el.appendChild(row);
+  }
+  el.style.display = 'block';
+}
+
+function renderHome(prefixHtml) {
+  stopScroll();
+  $('songview').style.display = 'none';
+  $('controls').style.display = 'none';
+  const s = $('status');
+  s.style.display = 'block';
+  s.innerHTML = (prefixHtml ||
+    '<span class="big">&#127928;</span>Search for a song and get its highest-rated user-submitted chord sheet from Ultimate Guitar.') +
+    '<div class="lib" id="lib"></div><div class="recent" id="recent"></div>';
+  renderLib();
+  renderRecent();
+}
+
+// ---------- search suggestions ----------
+let suggTimer = null, suggAbort = null;
+
+function hideSugg() {
+  const el = $('sugg');
+  el.style.display = 'none';
+  el.innerHTML = '';
+}
+
+async function fetchSugg(q) {
+  try {
+    suggAbort?.abort();
+    suggAbort = new AbortController();
+    const res = await fetch(API_BASE + '/api/suggest?q=' + encodeURIComponent(q), { signal: suggAbort.signal });
+    const list = await res.json();
+    if ($('q').value.trim() !== q) return; // stale response
+    renderSugg(list);
+  } catch {}
+}
+
+function renderSugg(list) {
+  const el = $('sugg');
+  if (!Array.isArray(list) || !list.length) { hideSugg(); return; }
+  el.innerHTML = '';
+  for (const s of list) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'sugg-row';
+    const img = document.createElement('img');
+    img.alt = '';
+    if (s.art) img.src = s.art; else img.style.visibility = 'hidden';
+    b.appendChild(img);
+    const d = document.createElement('div');
+    d.className = 'txt';
+    d.innerHTML = '<div class="t">' + esc(s.title) + '</div><div class="a">' + esc(s.artist) + '</div>';
+    b.appendChild(d);
+    b.onclick = () => search('', { artist: s.artist, title: s.title });
+    el.appendChild(b);
+  }
+  el.style.display = 'block';
+}
+
+$('q').addEventListener('input', () => {
+  const q = $('q').value.trim();
+  clearTimeout(suggTimer);
+  if (q.length < 2) { hideSugg(); return; }
+  suggTimer = setTimeout(() => fetchSugg(q), 250);
+});
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.searchwrap')) hideSugg();
+});
+
+// ---------- autoscroll + wake lock ----------
+let rafId = null, lastT = 0, frac = 0, wakeLock = null;
+
+function scrollStep(t) {
+  if (!scrolling) return;
+  if (lastT) {
+    const pxPerSec = 6 + Number($('speed').value) * 7;
+    frac += ((t - lastT) / 1000) * pxPerSec;
+    const px = Math.floor(frac);
+    if (px) { window.scrollBy(0, px); frac -= px; }
+    if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 2) stopScroll();
+  }
+  lastT = t;
+  rafId = requestAnimationFrame(scrollStep);
+}
+async function startScroll() {
+  scrolling = true; lastT = 0; frac = 0;
+  $('scrollbtn').classList.add('on');
+  $('scrollbtn').innerHTML = '&#10073;&#10073;';
+  rafId = requestAnimationFrame(scrollStep);
+  try { wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
+}
+function stopScroll() {
+  scrolling = false;
+  if (rafId) cancelAnimationFrame(rafId);
+  const b = $('scrollbtn');
+  if (b) { b.classList.remove('on'); b.innerHTML = '&#9654;'; }
+  wakeLock?.release().catch(() => {}); wakeLock = null;
+}
+
+// ---------- wire up ----------
+$('form').addEventListener('submit', (e) => { e.preventDefault(); search($('q').value); });
+$('homebtn').onclick = () => { $('q').value = ''; hideSugg(); renderHome(); };
+$('tup').onclick = () => { offset = Math.min(11, offset + 1); renderSheet(); saveToLibrary(); };
+$('tdown').onclick = () => { offset = Math.max(-11, offset - 1); renderSheet(); saveToLibrary(); };
+$('toff').onclick = () => { offset = 0; renderSheet(); saveToLibrary(); };
+$('fup').onclick = () => { sheetSize = Math.min(24, sheetSize + 1); document.documentElement.style.setProperty('--sheet-size', sheetSize + 'px'); };
+$('fdown').onclick = () => { sheetSize = Math.max(10, sheetSize - 1); document.documentElement.style.setProperty('--sheet-size', sheetSize + 'px'); };
+$('scrollbtn').onclick = () => scrolling ? stopScroll() : startScroll();
+$('versions').onchange = (e) => switchVersion(Number(e.target.value));
+document.addEventListener('visibilitychange', () => { if (document.hidden) stopScroll(); });
+
+renderHome();
+</script>
+</body>
+</html>

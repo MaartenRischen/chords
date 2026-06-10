@@ -1,0 +1,13 @@
+{
+  "name": "chords",
+  "version": "1.0.0",
+  "description": "Mobile chord-sheet viewer \u2014 highest-rated user-submitted Ultimate Guitar chords with transposition",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "type": "module"
+}
