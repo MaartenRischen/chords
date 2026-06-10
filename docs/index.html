@@ -130,6 +130,8 @@
     white-space: pre; overflow-x: auto; -webkit-overflow-scrolling: touch;
     padding: 14px 16px 30px;
   }
+  #sheet { touch-action: pan-x pan-y; }
+  #sheet .sheetin { display: inline-block; }
   #sheet .ch { color: var(--accent); font-weight: 700; }
   #sheet .sec { color: var(--accent2); font-weight: 700; }
 
@@ -198,6 +200,7 @@
       <span class="label">Aa</span>
       <button class="btn" id="fdown" style="font-size:14px">A</button>
       <button class="btn" id="fup">A</button>
+      <button class="btn" id="fitbtn" style="font-size:15px" title="Fit to screen">&#x2194;</button>
     </div>
     <div class="group">
       <button class="btn" id="scrollbtn">&#9654;</button>
@@ -250,6 +253,22 @@ function esc(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+function setSheetSize(px) {
+  sheetSize = Math.min(26, Math.max(7, px));
+  document.documentElement.style.setProperty('--sheet-size', sheetSize + 'px');
+}
+
+// Snap font size so the widest line exactly fits the screen width.
+function fitToScreen() {
+  const sheet = $('sheet');
+  const inner = sheet.firstElementChild;
+  if (!inner || $('songview').style.display === 'none') return;
+  const cs = getComputedStyle(sheet);
+  const avail = sheet.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  const w = inner.getBoundingClientRect().width;
+  if (w > 0 && avail > 0) setSheetSize(Math.min(18, Math.floor(sheetSize * (avail / w) * 10) / 10));
+}
+
 function renderSheet() {
   const flat = prefersFlat(currentTab.content);
   let html = esc(currentTab.content)
@@ -265,7 +284,7 @@ function renderSheet() {
     })
     .replace(/^\[(Intro|Verse|Chorus|Bridge|Outro|Pre-Chorus|Solo|Interlude|Instrumental|Hook|Refrain)[^\]\n]*\]/gim,
       (m) => '<span class="sec">' + m + '</span>');
-  $('sheet').innerHTML = html;
+  $('sheet').innerHTML = '<div class="sheetin">' + html + '</div>';
   $('toff').textContent = offset > 0 ? '+' + offset : String(offset);
 
   const key = currentTab.tonality;
@@ -303,6 +322,7 @@ function showTab(tab) {
   $('songview').style.display = 'block';
   $('controls').style.display = 'block';
   window.scrollTo(0, 0);
+  requestAnimationFrame(fitToScreen);
   saveToLibrary();
 }
 
@@ -536,8 +556,24 @@ $('homebtn').onclick = () => { $('q').value = ''; hideSugg(); renderHome(); };
 $('tup').onclick = () => { offset = Math.min(11, offset + 1); renderSheet(); saveToLibrary(); };
 $('tdown').onclick = () => { offset = Math.max(-11, offset - 1); renderSheet(); saveToLibrary(); };
 $('toff').onclick = () => { offset = 0; renderSheet(); saveToLibrary(); };
-$('fup').onclick = () => { sheetSize = Math.min(24, sheetSize + 1); document.documentElement.style.setProperty('--sheet-size', sheetSize + 'px'); };
-$('fdown').onclick = () => { sheetSize = Math.max(10, sheetSize - 1); document.documentElement.style.setProperty('--sheet-size', sheetSize + 'px'); };
+$('fup').onclick = () => setSheetSize(sheetSize + 1);
+$('fdown').onclick = () => setSheetSize(sheetSize - 1);
+$('fitbtn').onclick = () => fitToScreen();
+window.addEventListener('orientationchange', () => setTimeout(fitToScreen, 300));
+
+// pinch to zoom the sheet text
+let pinchStart = null;
+const touchDist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+$('sheet').addEventListener('touchstart', (e) => {
+  if (e.touches.length === 2) pinchStart = { d: touchDist(e.touches), size: sheetSize };
+}, { passive: true });
+$('sheet').addEventListener('touchmove', (e) => {
+  if (pinchStart && e.touches.length === 2) {
+    e.preventDefault();
+    setSheetSize(pinchStart.size * touchDist(e.touches) / pinchStart.d);
+  }
+}, { passive: false });
+$('sheet').addEventListener('touchend', () => { pinchStart = null; });
 $('scrollbtn').onclick = () => scrolling ? stopScroll() : startScroll();
 $('versions').onchange = (e) => switchVersion(Number(e.target.value));
 document.addEventListener('visibilitychange', () => { if (document.hidden) stopScroll(); });
