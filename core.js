@@ -35,18 +35,28 @@ function ugApiKey() {
   return crypto.createHash('md5').update(ugClientId() + stamp + 'createLog()').digest('hex');
 }
 
+function ugHeaders() {
+  return {
+    'X-UG-CLIENT-ID': ugClientId(),
+    'X-UG-API-KEY': ugApiKey(),
+    'Accept-Charset': 'utf-8',
+    'Accept': 'application/json',
+    'User-Agent': 'UGT_ANDROID/4.11.1 (Pixel; Android 11)',
+  };
+}
+
 async function ugTabInfo(tabId) {
   const url = `https://api.ultimate-guitar.com/api/v1/tab/info?tab_id=${tabId}&tab_access_type=public`;
-  const res = await fetch(url, {
-    headers: {
-      'X-UG-CLIENT-ID': ugClientId(),
-      'X-UG-API-KEY': ugApiKey(),
-      'Accept-Charset': 'utf-8',
-      'Accept': 'application/json',
-      'User-Agent': 'UGT_ANDROID/4.11.1 (Pixel; Android 11)',
-    },
-  });
+  const res = await fetch(url, { headers: ugHeaders() });
   if (!res.ok) throw new Error(`UG API ${res.status} for tab ${tabId}`);
+  return res.json();
+}
+
+// All tabs of a song across every type (Chords, Tabs, Bass, Ukulele, ...).
+async function ugSongTabs(songId) {
+  const url = `https://api.ultimate-guitar.com/api/v1/song/tabs?song_id=${songId}`;
+  const res = await fetch(url, { headers: ugHeaders() });
+  if (!res.ok) throw new Error(`UG API ${res.status} for song ${songId}`);
   return res.json();
 }
 
@@ -120,6 +130,11 @@ function artistSlugVariants(artist) {
   return [...variants].filter(Boolean);
 }
 
+// Any tab ID of the right song works as a seed — UG's tab/info returns the
+// song's full version list (incl. Chords) regardless of which type we hit.
+// So match every tab type, preferring IDs that came from a -chords- URL.
+const TAB_TYPES = 'chords|tabs|tab|ukulele|bass|drums|power|guitar-pro|official|chord';
+
 async function cdxFindIds(songs) {
   for (const song of songs) {
     const songSlug = slugify(song.title);
@@ -127,14 +142,24 @@ async function cdxFindIds(songs) {
     for (const artistSlug of artistSlugVariants(song.artist)) {
       const cdxUrl =
         `http://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(
-          `tabs.ultimate-guitar.com/tab/${artistSlug}/${songSlug}-chords-`
-        )}&matchType=prefix&collapse=urlkey&fl=original&limit=50`;
+          `tabs.ultimate-guitar.com/tab/${artistSlug}/${songSlug}`
+        )}&matchType=prefix&collapse=urlkey&fl=original&limit=100`;
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           const res = await fetch(cdxUrl, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(10000) });
           if (!res.ok) break;
           const text = await res.text();
-          const ids = [...new Set([...text.matchAll(/-chords-(\d+)/g)].map((m) => Number(m[1])))];
+          const re = new RegExp(
+            `tab/${artistSlug}/${songSlug}[-_](?:(${TAB_TYPES})[-_])?(\\d{3,})`, 'g'
+          );
+          const chordIds = new Set(), otherIds = new Set();
+          let m;
+          while ((m = re.exec(text)) !== null) {
+            const id = Number(m[2]);
+            if (m[1] === 'chords' || m[1] === 'chord') chordIds.add(id);
+            else otherIds.add(id);
+          }
+          const ids = [...chordIds, ...[...otherIds].filter((i) => !chordIds.has(i))];
           if (ids.length) return ids;
           break; // empty result is a real answer; try next variant
         } catch (e) {
@@ -254,10 +279,20 @@ export async function handleSong(query, picked) {
     const label = picked ? `${picked.artist} — ${picked.title}` : query;
     if (!ids.length) throw new HttpError(404, `No Ultimate Guitar results found for "${label}"`);
 
-    // tab/info on any version returns the song's full version list.
+    // Any tab of the song gives us its song_id; song/tabs then lists every
+    // version across all types. (tab/info's own `versions` array is per-type,
+    // so a non-chords seed would otherwise dead-end.)
     const seed = await ugTabInfo(ids[0]);
-    const all = [seed, ...(seed.versions || [])];
-    const candidates = all.filter(isUserChords);
+    let candidates = [];
+    if (seed.song_id) {
+      try {
+        const all = await ugSongTabs(seed.song_id);
+        candidates = (all.tabs || []).filter(isUserChords);
+      } catch (e) {
+        console.error(`[song/tabs] ${seed.song_id}: ${e.message}`);
+      }
+    }
+    if (!candidates.length) candidates = [seed, ...(seed.versions || [])].filter(isUserChords);
     if (!candidates.length) {
       throw new HttpError(404, `Found "${seed.song_name}" by ${seed.artist_name}, but it has no user-submitted chord versions`);
     }
