@@ -67,7 +67,7 @@ function slugify(s) {
 
 export async function itunesSearch(query, limit) {
   const url = `https://itunes.apple.com/search?term=${encodeURIComponent(query)}&media=music&entity=song&limit=${limit * 3}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+  const res = await fetch(url, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(6000) });
   if (!res.ok) return [];
   const data = await res.json();
   const seen = new Set();
@@ -80,6 +80,31 @@ export async function itunesSearch(query, limit) {
     if (out.length === limit) break;
   }
   return out;
+}
+
+async function deezerSearch(query, limit) {
+  const url = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=${limit * 3}`;
+  const res = await fetch(url, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(6000) });
+  if (!res.ok) return [];
+  const data = await res.json();
+  const seen = new Set();
+  const out = [];
+  for (const r of data.data || []) {
+    const key = slugify(r.artist?.name || '') + '/' + slugify(r.title || '');
+    if (key === '/' || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ artist: r.artist.name, title: r.title, art: r.album?.cover_small || '' });
+    if (out.length === limit) break;
+  }
+  return out;
+}
+
+// iTunes rate-limits shared datacenter IPs (e.g. Cloudflare egress); Deezer
+// is the fallback so suggestions keep working from the Worker.
+export async function musicSearch(query, limit) {
+  let r = await itunesSearch(query, limit).catch(() => []);
+  if (!r.length) r = await deezerSearch(query, limit).catch(() => []);
+  return r;
 }
 
 function artistSlugVariants(artist) {
@@ -106,7 +131,7 @@ async function cdxFindIds(songs) {
         )}&matchType=prefix&collapse=urlkey&fl=original&limit=50`;
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
-          const res = await fetch(cdxUrl, { signal: AbortSignal.timeout(10000) });
+          const res = await fetch(cdxUrl, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(10000) });
           if (!res.ok) break;
           const text = await res.text();
           const ids = [...new Set([...text.matchAll(/-chords-(\d+)/g)].map((m) => Number(m[1])))];
@@ -147,7 +172,7 @@ async function bingFindIds(query) {
 // `picked` (optional {artist, title}) comes from a chosen search suggestion and
 // skips the iTunes guess entirely.
 async function findTabIds(query, picked) {
-  const songs = picked ? [picked] : await itunesSearch(query, 3).catch(() => []);
+  const songs = picked ? [picked] : await musicSearch(query, 3).catch(() => []);
   const ids = await cdxFindIds(songs).catch((e) => {
     console.error(`[cdx] ${e.message}`);
     return [];
@@ -211,11 +236,11 @@ export class HttpError extends Error {
 const cache = new Map();
 const CACHE_TTL = 1000 * 60 * 30;
 
-function cached(key, fn) {
+function cached(key, fn, skipEmpty = false) {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.t < CACHE_TTL) return Promise.resolve(hit.v);
   return fn().then((v) => {
-    cache.set(key, { t: Date.now(), v });
+    if (!(skipEmpty && Array.isArray(v) && !v.length)) cache.set(key, { t: Date.now(), v });
     return v;
   });
 }
@@ -252,7 +277,7 @@ export async function handleTab(id) {
 
 export function handleSuggest(q) {
   if (q.length < 2) return Promise.resolve([]);
-  return cached(`suggest:${q.toLowerCase()}`, () => itunesSearch(q, 8));
+  return cached(`suggest:${q.toLowerCase()}`, () => musicSearch(q, 8), true);
 }
 
 // Shared request router: returns {status, body} for /api/* paths, or null.

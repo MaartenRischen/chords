@@ -4,7 +4,13 @@ Mobile web app: search any song, get its **highest-rated user-submitted chord
 version** from Ultimate Guitar in a clean read-while-you-play view, with
 transposition.
 
-## Run
+## Use it
+
+**Live:** https://maartenrischen.github.io/chords/ — static frontend on GitHub
+Pages (`docs/`), API on a free Cloudflare Worker
+(`chords-api.maartenrischen.workers.dev`).
+
+**Local:**
 
 ```sh
 npm start          # http://localhost:3456
@@ -12,6 +18,10 @@ npm start          # http://localhost:3456
 
 Zero dependencies, Node 18+. Open it on your phone via your Mac's LAN IP
 (`http://<mac-ip>:3456`).
+
+**Deploy changes:** `npx wrangler deploy` for the API (`worker.js` + `core.js`);
+`git push` redeploys the frontend (Pages serves `main:/docs`). `server.js` and
+`worker.js` share the same `core.js`, so API changes apply to both.
 
 ## Features
 
