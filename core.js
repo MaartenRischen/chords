@@ -109,12 +109,26 @@ async function deezerSearch(query, limit) {
   return out;
 }
 
-// iTunes rate-limits shared datacenter IPs (e.g. Cloudflare egress); Deezer
-// is the fallback so suggestions keep working from the Worker.
+// Query iTunes and Deezer in parallel and interleave the results — they rank
+// differently, so the union surfaces songs either would bury (and it keeps
+// suggestions alive when iTunes rate-limits shared datacenter IPs).
 export async function musicSearch(query, limit) {
-  let r = await itunesSearch(query, limit).catch(() => []);
-  if (!r.length) r = await deezerSearch(query, limit).catch(() => []);
-  return r;
+  const [it, dz] = await Promise.all([
+    itunesSearch(query, limit).catch(() => []),
+    deezerSearch(query, limit).catch(() => []),
+  ]);
+  const seen = new Set();
+  const out = [];
+  for (let i = 0; i < Math.max(it.length, dz.length) && out.length < limit; i++) {
+    for (const s of [it[i], dz[i]]) {
+      if (!s || out.length >= limit) continue;
+      const key = slugify(s.artist) + '/' + slugify(s.title);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(s);
+    }
+  }
+  return out;
 }
 
 function artistSlugVariants(artist) {
@@ -312,7 +326,7 @@ export async function handleTab(id) {
 
 export function handleSuggest(q) {
   if (q.length < 2) return Promise.resolve([]);
-  return cached(`suggest:${q.toLowerCase()}`, () => musicSearch(q, 8), true);
+  return cached(`suggest:${q.toLowerCase()}`, () => musicSearch(q, 12), true);
 }
 
 // Shared request router: returns {status, body} for /api/* paths, or null.
