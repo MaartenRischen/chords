@@ -45,10 +45,20 @@ function ugHeaders() {
   };
 }
 
+function ugError(status, what) {
+  // UG serves 451 (and sometimes 403/429) to datacenter IPs — incl. Cloudflare
+  // Workers — for licensed catalogs (e.g. Michael Jackson), even when the tab is
+  // public on the website. Callers treat this as a signal to fall back to the
+  // Wayback archive. The status is preserved so they can tell blocks from 404s.
+  const err = new Error(`UG API ${status} for ${what}`);
+  err.status = status;
+  return err;
+}
+
 async function ugTabInfo(tabId) {
   const url = `https://api.ultimate-guitar.com/api/v1/tab/info?tab_id=${tabId}&tab_access_type=public`;
   const res = await fetch(url, { headers: ugHeaders() });
-  if (!res.ok) throw new Error(`UG API ${res.status} for tab ${tabId}`);
+  if (!res.ok) throw ugError(res.status, `tab ${tabId}`);
   return res.json();
 }
 
@@ -56,7 +66,7 @@ async function ugTabInfo(tabId) {
 async function ugSongTabs(songId) {
   const url = `https://api.ultimate-guitar.com/api/v1/song/tabs?song_id=${songId}`;
   const res = await fetch(url, { headers: ugHeaders() });
-  if (!res.ok) throw new Error(`UG API ${res.status} for song ${songId}`);
+  if (!res.ok) throw ugError(res.status, `song ${songId}`);
   return res.json();
 }
 
@@ -149,7 +159,10 @@ function artistSlugVariants(artist) {
 // So match every tab type, preferring IDs that came from a -chords- URL.
 const TAB_TYPES = 'chords|tabs|tab|ukulele|bass|drums|power|guitar-pro|official|chord';
 
-async function cdxFindIds(songs) {
+// Returns every archived snapshot row {ts, orig, status, type, id} for the first
+// artist/song slug that has any, plus the {artist, title} that resolved it. The
+// rows are reused by the Wayback fallback so it never re-queries the index.
+async function cdxFind(songs) {
   for (const song of songs) {
     const songSlug = slugify(song.title);
     if (!songSlug) continue;
@@ -157,24 +170,22 @@ async function cdxFindIds(songs) {
       const cdxUrl =
         `http://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(
           `tabs.ultimate-guitar.com/tab/${artistSlug}/${songSlug}`
-        )}&matchType=prefix&collapse=urlkey&fl=original&limit=100`;
+        )}&matchType=prefix&fl=timestamp,original,statuscode&limit=600`;
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           const res = await fetch(cdxUrl, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(10000) });
           if (!res.ok) break;
           const text = await res.text();
-          const re = new RegExp(
-            `tab/${artistSlug}/${songSlug}[-_](?:(${TAB_TYPES})[-_])?(\\d{3,})`, 'g'
-          );
-          const chordIds = new Set(), otherIds = new Set();
-          let m;
-          while ((m = re.exec(text)) !== null) {
-            const id = Number(m[2]);
-            if (m[1] === 'chords' || m[1] === 'chord') chordIds.add(id);
-            else otherIds.add(id);
+          const re = new RegExp(`tab/${artistSlug}/${songSlug}[-_](?:(${TAB_TYPES})[-_])?(\\d{3,})`);
+          const rows = [];
+          for (const line of text.split('\n')) {
+            if (!line) continue;
+            const [ts, orig, status] = line.split(' ');
+            const m = orig && orig.match(re);
+            if (!m) continue;
+            rows.push({ ts, orig, status, type: m[1] || '', id: Number(m[2]) });
           }
-          const ids = [...chordIds, ...[...otherIds].filter((i) => !chordIds.has(i))];
-          if (ids.length) return ids;
+          if (rows.length) return { rows, resolved: song };
           break; // empty result is a real answer; try next variant
         } catch (e) {
           console.error(`[cdx] ${artistSlug}/${songSlug} (try ${attempt + 1}): ${e.message}`);
@@ -183,7 +194,17 @@ async function cdxFindIds(songs) {
       }
     }
   }
-  return [];
+  return { rows: [], resolved: null };
+}
+
+// Prefer IDs that came from a -chords- URL; any tab type still seeds the song.
+function idsFromRows(rows) {
+  const chordIds = new Set(), otherIds = new Set();
+  for (const r of rows) {
+    if (r.type === 'chords' || r.type === 'chord') chordIds.add(r.id);
+    else otherIds.add(r.id);
+  }
+  return [...chordIds, ...[...otherIds].filter((i) => !chordIds.has(i))];
 }
 
 async function bingFindIds(query) {
@@ -209,16 +230,159 @@ async function bingFindIds(query) {
 }
 
 // `picked` (optional {artist, title}) comes from a chosen search suggestion and
-// skips the iTunes guess entirely.
-async function findTabIds(query, picked) {
+// skips the iTunes guess entirely. Returns live-API seed `ids`, the CDX `rows`
+// (for the Wayback fallback), and the `resolved` song for labelling.
+async function discover(query, picked) {
   const songs = picked ? [picked] : await musicSearch(query, 3).catch(() => []);
-  const ids = await cdxFindIds(songs).catch((e) => {
+  const { rows, resolved } = await cdxFind(songs).catch((e) => {
     console.error(`[cdx] ${e.message}`);
-    return [];
+    return { rows: [], resolved: null };
   });
-  if (ids.length) return ids;
+  const ids = idsFromRows(rows);
+  if (ids.length) return { ids, rows, resolved: resolved || songs[0] || null };
   const bingQuery = picked ? `${picked.artist} ${picked.title}` : query;
-  return bingFindIds(bingQuery);
+  const bingIds = await bingFindIds(bingQuery).catch(() => []);
+  return { ids: bingIds, rows: [], resolved: picked || songs[0] || null };
+}
+
+// ---------------------------------------------------------------------------
+// Wayback archive fallback (when UG blocks the live API for the worker's IP)
+// ---------------------------------------------------------------------------
+
+// UG embeds the full page state — tab metadata, the cross-type version list with
+// ratings, and the chord content — in the archived HTML. Modern snapshots use a
+// <div class="js-store" data-content="...escaped json..."> blob; older ones a
+// `window.UGAPP.store.page = {...}` assignment. Return store.page.data from
+// whichever is present.
+function parseUgStore(html) {
+  const re = /data-content="([^"]*)"/g;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const json = m[1]
+      .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&#x27;/gi, "'")
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+    let obj;
+    try { obj = JSON.parse(json); } catch { continue; }
+    const data = obj?.store?.page?.data;
+    if (data?.tab) return data;
+  }
+  const w = html.match(/window\.UGAPP\.store\.page\s*=\s*(\{[\s\S]*?\});\s*window\.UGAPP/);
+  if (w) { try { const p = JSON.parse(w[1]); if (p?.data?.tab) return p.data; } catch {} }
+  return null;
+}
+
+async function wbFetchData(ts, orig) {
+  // id_ → raw archived response (no Wayback toolbar injected into the HTML).
+  const url = `http://web.archive.org/web/${ts}id_/${orig}`;
+  const res = await fetch(url, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(12000) });
+  if (!res.ok) return null;
+  return parseUgStore(await res.text());
+}
+
+// Compact archive reference passed to the client and back (for version switching)
+// — `<timestamp>~<original-url>`. Validated before re-fetch to prevent SSRF.
+function wbRef(row) { return `${row.ts}~${row.orig}`; }
+
+async function wbFetchFromRef(wb) {
+  const i = wb.indexOf('~');
+  if (i < 0) return null;
+  const ts = wb.slice(0, i), orig = wb.slice(i + 1);
+  if (!/^\d{8,}$/.test(ts)) return null;
+  if (!/^https?:\/\/tabs\.ultimate-guitar\.com\//.test(orig)) return null;
+  return wbFetchData(ts, orig);
+}
+
+function capoFrom(data) {
+  if (data.tab?.capo) return data.tab.capo;
+  const c = data.tab_view?.meta?.capo;
+  if (c) return Number(c) || 0;
+  const m = (data.tab_view?.wiki_tab?.content || '').match(/capo:?\s*(\d{1,2})/i);
+  return m ? Number(m[1]) : 0;
+}
+
+function wbPayload(data, versions) {
+  const t = data.tab;
+  return {
+    id: t.id,
+    artist: t.artist_name,
+    song: t.song_name,
+    version: t.version,
+    rating: Math.round((t.rating || 0) * 100) / 100,
+    votes: t.votes || 0,
+    capo: capoFrom(data),
+    tuning: data.tab_view?.meta?.tuning?.value || '',
+    tonality: t.tonality_name || '',
+    content: data.tab_view?.wiki_tab?.content || '',
+    versions,
+  };
+}
+
+// Archived `tab_access_type` is sometimes absent on older snapshots; treat
+// anything not explicitly Pro/private as a public user version.
+function isWbChords(v) {
+  return v.type === 'Chords' && v.tab_access_type !== 'private';
+}
+
+// Build a full song payload purely from archived snapshots: a seed fetch yields
+// the cross-type version list (with ratings) for ranking; a second fetches the
+// winning version's content. Every returned version carries a `wb` ref so the
+// picker can switch versions without ever touching the blocked live API.
+//
+// CDX lists snapshots whose raw `id_` capture sometimes 404s, so we try several
+// (newest first, chords pages preferred) rather than committing to one.
+async function waybackSong(rows, resolved) {
+  const ok = rows.filter((r) => r.status === '200' || r.status === '-');
+  if (!ok.length) return null;
+  const byId = new Map(); // newest servable snapshot per tab id
+  for (const r of ok) {
+    const cur = byId.get(r.id);
+    if (!cur || r.ts > cur.ts) byId.set(r.id, r);
+  }
+  const byTs = (a, b) => b.ts.localeCompare(a.ts);
+  const isChords = (r) => r.type === 'chords' || r.type === 'chord';
+  const seedRows = [
+    ...[...byId.values()].filter(isChords).sort(byTs),
+    ...[...byId.values()].filter((r) => !isChords(r)).sort(byTs),
+  ].slice(0, 8);
+
+  let seed = null, seedRow = null;
+  for (const r of seedRows) {
+    const d = await wbFetchData(r.ts, r.orig);
+    if (d?.tab && (d.tab_view?.versions?.length || d.tab_view?.wiki_tab?.content)) { seed = d; seedRow = r; break; }
+  }
+  if (!seed) return null;
+
+  // Candidates = the parsed seed's own tab (content already in hand) unioned with
+  // every other public chords version the archive can actually serve. The seed
+  // must be included directly: UG's archived version list sometimes omits the very
+  // tab the page belongs to, so relying on the list alone can drop a working pick.
+  const candMap = new Map();
+  if (isWbChords(seed.tab)) candMap.set(seed.tab.id, seed.tab);
+  for (const v of seed.tab_view?.versions || []) {
+    if (isWbChords(v) && (v.id === seed.tab.id || byId.has(v.id)) && !candMap.has(v.id)) {
+      candMap.set(v.id, v);
+    }
+  }
+  const candidates = [...candMap.values()];
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => score(b) - score(a));
+
+  let bestData = null;
+  for (const v of candidates.slice(0, 6)) {
+    if (v.id === seed.tab.id && seed.tab_view?.wiki_tab?.content) { bestData = seed; break; }
+    const row = byId.get(v.id);
+    if (!row) continue;
+    const d = await wbFetchData(row.ts, row.orig);
+    if (d?.tab_view?.wiki_tab?.content) { bestData = d; break; }
+  }
+  if (!bestData) return null;
+
+  const versions = candidates.map((v) => {
+    // Prefer the snapshot we know parsed for the seed's own version.
+    const row = v.id === seed.tab.id ? seedRow : byId.get(v.id);
+    return { ...versionSummary(v), wb: row ? wbRef(row) : undefined };
+  });
+  return wbPayload(bestData, versions);
 }
 
 // ---------------------------------------------------------------------------
@@ -284,41 +448,71 @@ function cached(key, fn, skipEmpty = false) {
   });
 }
 
+// Live UG mobile API path: any tab of the song gives us its song_id; song/tabs
+// then lists every version across all types. (tab/info's own `versions` array is
+// per-type, so a non-chords seed would otherwise dead-end.)
+async function apiSong(ids) {
+  const seed = await ugTabInfo(ids[0]);
+  let candidates = [];
+  if (seed.song_id) {
+    try {
+      const all = await ugSongTabs(seed.song_id);
+      candidates = (all.tabs || []).filter(isUserChords);
+    } catch (e) {
+      console.error(`[song/tabs] ${seed.song_id}: ${e.message}`);
+    }
+  }
+  if (!candidates.length) candidates = [seed, ...(seed.versions || [])].filter(isUserChords);
+  if (!candidates.length) {
+    throw new HttpError(404, `Found "${seed.song_name}" by ${seed.artist_name}, but it has no user-submitted chord versions`);
+  }
+  candidates.sort((a, b) => score(b) - score(a));
+  const best = candidates[0];
+  const info = best.id === seed.id ? seed : await ugTabInfo(best.id);
+  return tabPayload(info, candidates.map(versionSummary));
+}
+
 export async function handleSong(query, picked) {
   const key = picked
     ? `song:${picked.artist.toLowerCase()}|${picked.title.toLowerCase()}`
     : `song:${query.toLowerCase()}`;
   return cached(key, async () => {
-    const ids = await findTabIds(query, picked);
-    const label = picked ? `${picked.artist} — ${picked.title}` : query;
-    if (!ids.length) throw new HttpError(404, `No Ultimate Guitar results found for "${label}"`);
+    const { ids, rows, resolved } = await discover(query, picked);
+    const label = picked
+      ? `${picked.artist} — ${picked.title}`
+      : (resolved ? `${resolved.artist} — ${resolved.title}` : query);
+    if (!ids.length && !rows.length) throw new HttpError(404, `No Ultimate Guitar results found for "${label}"`);
 
-    // Any tab of the song gives us its song_id; song/tabs then lists every
-    // version across all types. (tab/info's own `versions` array is per-type,
-    // so a non-chords seed would otherwise dead-end.)
-    const seed = await ugTabInfo(ids[0]);
-    let candidates = [];
-    if (seed.song_id) {
+    // Primary: live UG API (freshest ratings). On a block (451/403/429) or any
+    // failure, fall back to the Wayback archive, which serves the same content
+    // from an IP UG never blocks.
+    let apiErr = null;
+    if (ids.length) {
       try {
-        const all = await ugSongTabs(seed.song_id);
-        candidates = (all.tabs || []).filter(isUserChords);
+        return await apiSong(ids);
       } catch (e) {
-        console.error(`[song/tabs] ${seed.song_id}: ${e.message}`);
+        apiErr = e;
+        if (!rows.length) throw e;
+        console.error(`[song] live API failed (${e.status || e.message}); trying Wayback for "${label}"`);
       }
     }
-    if (!candidates.length) candidates = [seed, ...(seed.versions || [])].filter(isUserChords);
-    if (!candidates.length) {
-      throw new HttpError(404, `Found "${seed.song_name}" by ${seed.artist_name}, but it has no user-submitted chord versions`);
-    }
-    candidates.sort((a, b) => score(b) - score(a));
-    const best = candidates[0];
-    const info = best.id === seed.id ? seed : await ugTabInfo(best.id);
-    return tabPayload(info, candidates.map(versionSummary));
+    const wb = await waybackSong(rows, resolved).catch((e) => {
+      console.error(`[wayback] ${e.message}`);
+      return null;
+    });
+    if (wb) return wb;
+    if (apiErr) throw apiErr;
+    throw new HttpError(404, `No Ultimate Guitar results found for "${label}"`);
   });
 }
 
-export async function handleTab(id) {
-  return cached(`tab:${id}`, async () => {
+export async function handleTab(id, wb) {
+  return cached(wb ? `tab:wb:${wb}` : `tab:${id}`, async () => {
+    if (wb) {
+      const data = await wbFetchFromRef(wb).catch(() => null);
+      if (data?.tab_view?.wiki_tab?.content) return wbPayload(data, []);
+      // archive ref stale/unavailable → fall through to the live API
+    }
     const info = await ugTabInfo(id);
     return tabPayload(info, []);
   });
@@ -342,8 +536,9 @@ export async function apiRoute(pathname, params) {
     }
     if (pathname === '/api/tab') {
       const id = Number(params.get('id'));
+      const wb = (params.get('wb') || '').trim() || null;
       if (!id) return { status: 400, body: { error: 'Missing tab id' } };
-      return { status: 200, body: await handleTab(id) };
+      return { status: 200, body: await handleTab(id, wb) };
     }
     if (pathname === '/api/suggest') {
       const q = (params.get('q') || '').trim();

@@ -368,7 +368,10 @@ async function search(q, picked) {
 async function switchVersion(id) {
   setStatus('<div class="spinner"></div>Loading version…');
   try {
-    const tab = await api('/api/tab?id=' + id);
+    const v = versionList.find((x) => x.id === id);
+    let url = '/api/tab?id=' + id;
+    if (v && v.wb) url += '&wb=' + encodeURIComponent(v.wb);  // archive-sourced version
+    const tab = await api(url);
     showTab(tab);
   } catch (e) {
     setStatus('<span class="big">&#128533;</span>' + esc(e.message));
