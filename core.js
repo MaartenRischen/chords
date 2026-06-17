@@ -159,39 +159,95 @@ function artistSlugVariants(artist) {
 // So match every tab type, preferring IDs that came from a -chords- URL.
 const TAB_TYPES = 'chords|tabs|tab|ukulele|bass|drums|power|guitar-pro|official|chord';
 
+async function cdxFetch(url) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(12000) });
+      if (!res.ok) return null;
+      return await res.text();
+    } catch (e) {
+      console.error(`[cdx] ${e.message} (try ${attempt + 1})`);
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  return null;
+}
+
+// Exact-slug lookup: archived snapshot rows for tab/<artist>/<song>-...
+async function cdxExact(artistSlug, songSlug) {
+  const text = await cdxFetch(
+    `http://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(
+      `tabs.ultimate-guitar.com/tab/${artistSlug}/${songSlug}`
+    )}&matchType=prefix&fl=timestamp,original,statuscode&limit=600`
+  );
+  if (text === null) return null;
+  const re = new RegExp(`tab/${artistSlug}/${songSlug}[-_](?:(${TAB_TYPES})[-_])?(\\d{3,})`);
+  const rows = [];
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    const [ts, orig, status] = line.split(' ');
+    const m = orig && orig.match(re);
+    if (!m) continue;
+    rows.push({ ts, orig, status, type: m[1] || '', id: Number(m[2]) });
+  }
+  return rows;
+}
+
+// Punctuation-insensitive fallback: pull the artist's whole archived catalog and
+// match by normalized slug. Recovers songs UG slugs differently than we do —
+// e.g. "P.Y.T. (Pretty Young Thing)" → our "p-y-t" vs UG's "pyt-pretty-young-thing".
+async function cdxFuzzy(artistSlug, songSlug) {
+  const norm = (s) => s.replace(/-/g, '');
+  const target = norm(songSlug);
+  if (target.length < 3) return [];
+  const text = await cdxFetch(
+    `http://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(
+      `tabs.ultimate-guitar.com/tab/${artistSlug}/`
+    )}&matchType=prefix&fl=timestamp,original,statuscode&limit=4000`
+  );
+  if (!text) return [];
+  const re = new RegExp(`tab/${artistSlug}/([a-z0-9-]+?)[-_](?:(${TAB_TYPES})[-_])?(\\d{3,})`);
+  const bySong = new Map();
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    const [ts, orig, status] = line.split(' ');
+    const m = orig && orig.match(re);
+    if (!m) continue;
+    const arr = bySong.get(m[1]) || [];
+    arr.push({ ts, orig, status, type: m[2] || '', id: Number(m[3]) });
+    bySong.set(m[1], arr);
+  }
+  let best = null, bestScore = 49; // require a strong match
+  for (const [slug, rows] of bySong) {
+    const n = norm(slug);
+    let s = -1;
+    if (n === target) s = 100;
+    else if (n.startsWith(target)) s = 80 - (n.length - target.length);   // acronym → expansion
+    else if (target.startsWith(n)) s = 70 - (target.length - n.length);
+    if (s > bestScore) { bestScore = s; best = rows; }
+  }
+  return best || [];
+}
+
 // Returns every archived snapshot row {ts, orig, status, type, id} for the first
-// artist/song slug that has any, plus the {artist, title} that resolved it. The
+// artist/song slug that matches, plus the {artist, title} that resolved it. The
 // rows are reused by the Wayback fallback so it never re-queries the index.
 async function cdxFind(songs) {
   for (const song of songs) {
     const songSlug = slugify(song.title);
     if (!songSlug) continue;
     for (const artistSlug of artistSlugVariants(song.artist)) {
-      const cdxUrl =
-        `http://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(
-          `tabs.ultimate-guitar.com/tab/${artistSlug}/${songSlug}`
-        )}&matchType=prefix&fl=timestamp,original,statuscode&limit=600`;
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          const res = await fetch(cdxUrl, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(10000) });
-          if (!res.ok) break;
-          const text = await res.text();
-          const re = new RegExp(`tab/${artistSlug}/${songSlug}[-_](?:(${TAB_TYPES})[-_])?(\\d{3,})`);
-          const rows = [];
-          for (const line of text.split('\n')) {
-            if (!line) continue;
-            const [ts, orig, status] = line.split(' ');
-            const m = orig && orig.match(re);
-            if (!m) continue;
-            rows.push({ ts, orig, status, type: m[1] || '', id: Number(m[2]) });
-          }
-          if (rows.length) return { rows, resolved: song };
-          break; // empty result is a real answer; try next variant
-        } catch (e) {
-          console.error(`[cdx] ${artistSlug}/${songSlug} (try ${attempt + 1}): ${e.message}`);
-          await new Promise((r) => setTimeout(r, 1500));
-        }
-      }
+      const rows = await cdxExact(artistSlug, songSlug);
+      if (rows && rows.length) return { rows, resolved: song };
+    }
+  }
+  // Exact slug missed everywhere — try the fuzzy catalog match for the primary song.
+  const primary = songs[0];
+  if (primary) {
+    const songSlug = slugify(primary.title);
+    for (const artistSlug of artistSlugVariants(primary.artist)) {
+      const rows = await cdxFuzzy(artistSlug, songSlug);
+      if (rows.length) return { rows, resolved: primary };
     }
   }
   return { rows: [], resolved: null };
@@ -273,10 +329,17 @@ function parseUgStore(html) {
 
 async function wbFetchData(ts, orig) {
   // id_ → raw archived response (no Wayback toolbar injected into the HTML).
+  // Returns null on any failure (timeout, 404, network) so callers can just try
+  // the next snapshot — a single flaky archive fetch must not abort the fallback.
   const url = `http://web.archive.org/web/${ts}id_/${orig}`;
-  const res = await fetch(url, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(12000) });
-  if (!res.ok) return null;
-  return parseUgStore(await res.text());
+  try {
+    const res = await fetch(url, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(12000) });
+    if (!res.ok) return null;
+    return parseUgStore(await res.text());
+  } catch (e) {
+    console.error(`[wayback] fetch ${ts}: ${e.message}`);
+    return null;
+  }
 }
 
 // Compact archive reference passed to the client and back (for version switching)
